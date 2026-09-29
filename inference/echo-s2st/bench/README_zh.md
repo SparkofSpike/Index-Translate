@@ -39,6 +39,8 @@ python bench_dub.py --model-dir /path/to/dubbing_2b_fulldir_cv3 --mode vllm+comp
 
 说明：
 
+- **不要在服务线上推理的 GPU 上跑基准**（例如挂着在线 S2ST/S2TT worker
+  的机器）。用空闲卡；显存不够就换机器或排队，**严禁停线上进程腾显存**。
 - TensorRT（`load_trt`）**暂不覆盖**：包内未附带 flow decoder 的
   `.plan`（GPU 相关产物），需要先在本机做 ONNX→TRT 导出。vLLM 是该方向
   性价比最高的 80%。

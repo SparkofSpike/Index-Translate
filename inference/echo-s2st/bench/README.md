@@ -42,6 +42,9 @@ provided `vllm+compile` combination.
 
 Notes:
 
+- **Never benchmark on a GPU that serves production** (e.g. the box running the
+  online S2ST/S2TT workers). Use an idle card, and never stop an online
+  process to free VRAM — queue or move to another machine instead.
 - TensorRT (`load_trt`) is intentionally **not** covered: the package does not
   ship the flow-decoder `.plan` (GPU-specific), so TRT needs an on-box
   ONNX→TRT export first. vLLM is the cheap 80% of that direction.
