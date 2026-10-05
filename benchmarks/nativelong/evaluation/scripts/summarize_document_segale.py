@@ -4,10 +4,56 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
+
+
+def sha_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def verify_comet_artifacts(comet_summary: Path, suite_id: str, system_key: str) -> None:
+    """Reject an incomplete, stale or foreign COMET sidecar before trusting it.
+
+    Mirrors the chrF2 validation: completed marker, artifact manifest hash,
+    per-artifact hashes, run identity and input hashes must all agree.
+    """
+
+    comet_dir = Path(comet_summary).parent
+    completed_path = comet_dir / "COMPLETED.json"
+    if not completed_path.is_file():
+        raise ValueError(f"COMET run is not completed: missing {completed_path}")
+    completed = json.loads(completed_path.read_text(encoding="utf-8"))
+    if completed.get("status") != "completed":
+        raise ValueError(f"COMET run status is not completed: {completed.get('status')}")
+    artifact_path = comet_dir / "artifact-manifest.json"
+    if not artifact_path.is_file():
+        raise ValueError(f"COMET run has no artifact manifest: {artifact_path}")
+    if completed["artifact_manifest_sha256"] != sha_file(artifact_path):
+        raise ValueError("COMET artifact manifest hash mismatch")
+    artifacts = json.loads(artifact_path.read_text(encoding="utf-8"))
+    for name in ("summary.json", "per_window.jsonl"):
+        if artifacts[name] != sha_file(comet_dir / name):
+            raise ValueError("COMET artifact hash mismatch")
+    summary = json.loads(Path(comet_summary).read_text(encoding="utf-8"))
+    if summary.get("suite_id") != suite_id or summary.get("system_key") != system_key:
+        raise ValueError("COMET run identity mismatch")
+    inputs = summary.get("inputs")
+    if not isinstance(inputs, dict) or not inputs:
+        raise ValueError("COMET summary records no input hashes")
+    for name, record in inputs.items():
+        path = record.get("path") if isinstance(record, dict) else None
+        if not path or not Path(path).is_file():
+            raise ValueError(f"COMET input {name} is missing: {path}")
+        if record.get("sha256") != sha_file(path):
+            raise ValueError(f"COMET input hash mismatch: {name}")
 
 
 STANDARD_METADATA_FIELDS = (
@@ -49,6 +95,9 @@ def group_summary(rows: list[dict]) -> dict:
     return {
         "cases": len(rows),
         "scored_cases": scored_cases,
+        "scored_with_comet_cases": sum(
+            isinstance(row.get("segale_comet"), (int, float)) for row in rows
+        ),
         "failed_cases": len(rows) - scored_cases,
         "generation_status_counts": dict(sorted(statuses.items())),
         "segale_comet": mean(row.get("segale_comet") for row in rows),
@@ -103,11 +152,14 @@ def main() -> None:
     cases = read_jsonl(args.cases)
     generations = read_jsonl(args.generations)
     comet = json.loads(args.comet_summary.read_text(encoding="utf-8"))
+    verify_comet_artifacts(args.comet_summary, args.suite_id, args.system_key)
     cases_by_id = {row["case_id"]: row for row in cases}
     generations_by_id = {row["case_id"]: row for row in generations}
     scores_by_id = {row["case_id"]: row for row in comet["cases"]}
     if len(cases_by_id) != len(cases) or len(generations_by_id) != len(generations):
         raise ValueError("Duplicate case_id")
+    if len(scores_by_id) != len(comet["cases"]):
+        raise ValueError("Duplicate case_id in COMET summary")
     expected = set(cases_by_id)
     unexpected_generations = set(generations_by_id) - expected
     if unexpected_generations:
@@ -217,7 +269,7 @@ def main() -> None:
             row["auxiliary_metrics"] = {"chrf2": extra}
         result["auxiliary_metrics"] = {"chrf2": {
             "metric": auxiliary["metric"], "aggregate": aggregate(chrf_rows),
-            "artifact": "chrf2/summary.json",
+            "artifact": str(args.chrf_dir / "summary.json"),
         }}
         for field, buckets in grouped.items():
             for label, bucket in buckets.items():

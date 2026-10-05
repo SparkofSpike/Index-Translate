@@ -68,7 +68,9 @@ def main() -> None:
         raise ValueError(f"Unexpected generations: {sorted(unexpected)}")
     grouped_units: dict[str, list[dict]] = {case_id: [] for case_id in cases_by_id}
     for unit in units:
-        grouped_units.setdefault(unit["case_id"], []).append(unit)
+        if unit["case_id"] not in grouped_units:
+            raise ValueError(f"Alignment unit has unknown case_id: {unit['case_id']}")
+        grouped_units[unit["case_id"]].append(unit)
     selected, failures = [], []
     for case in cases:
         case_id = case["case_id"]
