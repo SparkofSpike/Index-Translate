@@ -21,6 +21,8 @@ HERE = Path(__file__).resolve().parent
 EVALUATION = HERE.parent
 SCRIPTS = EVALUATION / "scripts"
 ROOT = EVALUATION.parents[1]
+# The revision this review fixed; baseline assertions must not track HEAD.
+BASELINE_REV = "9cc5ee7"
 sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(EVALUATION))
 
@@ -50,9 +52,9 @@ import run as runner  # noqa: E402
 
 
 def baseline_module(relative_path: str, name: str):
-    """Load the pre-fix revision of a module straight out of git."""
+    """Load the pre-fix revision of a module straight out of the reviewed baseline."""
     source = subprocess.run(
-        ["git", "show", f"HEAD:{relative_path}"], cwd=ROOT, check=True,
+        ["git", "show", f"{BASELINE_REV}:{relative_path}"], cwd=ROOT, check=True,
         capture_output=True, text=True,
     ).stdout
     path = EVALUATION / "tests" / f"_baseline_{name}.py"
