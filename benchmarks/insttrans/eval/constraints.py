@@ -98,7 +98,10 @@ def _build_term_pattern(term: str) -> str:
     # CJK has no word boundaries; \b would never match against them.
     if any(("一" <= ch <= "鿿") or ("぀" <= ch <= "ヿ") for ch in term):
         return escaped
-    return rf"(?<!\w){escaped}(?!\w)"
+    # \w is Unicode-aware, so a Latin term glued to CJK text ("这是GPT-4的说明")
+    # had no boundary on either side and was reported missing. ASCII word
+    # classes accept CJK neighbours while still rejecting "GPT-4x".
+    return rf"(?<![0-9A-Za-z_]){escaped}(?![0-9A-Za-z_])"
 
 
 def check_glossary(target_text: str, required_terms: list[str]) -> dict[str, Any]:
@@ -146,7 +149,11 @@ def check_json_preserved(source_text: str, target_text: str) -> dict[str, Any]:
 
 
 def _extract_visible_text(html: str) -> str:
-    return re.sub(r"<[^>]+>", "", html).strip()
+    # Script/style bodies are not visible text: leaving them in would score the
+    # Chinese-residue ratio on markup and code instead of on what a reader sees.
+    without_code = re.sub(r"<(script|style)\b[^>]*>.*?</\1>", " ", html,
+                          flags=re.IGNORECASE | re.DOTALL)
+    return re.sub(r"<[^>]+>", "", without_code).strip()
 
 
 def _chinese_ratio(text: str) -> float:
@@ -196,15 +203,21 @@ def check_markdown_preserved(source_text: str, target_text: str) -> dict[str, An
     return {"is_valid": not issues, "issues": issues}
 
 
+# Placeholders a translation must carry over. Money such as "$100" is ordinary
+# text and must not be scored as a lost placeholder; only named "$var" forms are.
+PLACEHOLDER_PATTERNS = (
+    r"\{[a-zA-Z_][a-zA-Z0-9_]*\}",
+    r"\{\{[a-zA-Z_][a-zA-Z0-9_]*\}\}",
+    r"%[dsf]",
+    r"%\([a-zA-Z_][a-zA-Z0-9_]*\)[dsf]",
+    r"\$[a-zA-Z_][a-zA-Z0-9_]*",
+)
+PLACEHOLDER_TRIGGER = re.compile("|".join(PLACEHOLDER_PATTERNS))
+
+
 def check_placeholder_preserved(source_text: str, target_text: str) -> dict[str, Any]:
-    patterns = [
-        r"\{[a-zA-Z_][a-zA-Z0-9_]*\}",
-        r"%[dsf]",
-        r"\$\d+",
-        r"\{\{[a-zA-Z_][a-zA-Z0-9_]*\}\}",
-    ]
     issues = []
-    for pattern in patterns:
+    for pattern in PLACEHOLDER_PATTERNS:
         missing = set(re.findall(pattern, source_text)) - set(re.findall(pattern, target_text))
         if missing:
             issues.append(f"丢失占位符: {missing}")
@@ -238,15 +251,20 @@ def check_format_preserve(
         if not sub["is_valid"]:
             issues.extend(sub.get("issues", []))
 
-    if re.search(r"^#{1,6}\s|\*\*|`|^[-*+]\s|^>\s|\[.*?\]\(.*?\)", source_text, re.MULTILINE):
+    # Trigger on the same shapes check_markdown_preserved looks for: emphasis,
+    # ordered lists and tables were missing here, so a source carrying only those
+    # forms was passed without any markdown check at all.
+    if re.search(
+        r"^#{1,6}\s|\*\*[^*]+\*\*|\*[^*]+\*|`|^[-*+]\s|^\d+\.\s|^>\s|"
+        r"\[.*?\]\(.*?\)|\|.*\|",
+        source_text, re.MULTILINE,
+    ):
         sub = check_markdown_preserved(source_text, target_text)
         results["markdown"] = sub
         if not sub["is_valid"]:
             issues.extend(sub.get("issues", []))
 
-    if re.search(
-        r"\{[a-zA-Z_][a-zA-Z0-9_]*\}|%[dsf]|\$\d+|\{\{[a-zA-Z_][a-zA-Z0-9_]*\}\}", source_text
-    ):
+    if PLACEHOLDER_TRIGGER.search(source_text):
         sub = check_placeholder_preserved(source_text, target_text)
         results["placeholder"] = sub
         if not sub["is_valid"]:
@@ -267,8 +285,12 @@ def check_layout_preserved(
             issues.append(f"换行数不一致: 源文{src_nl}, 译文{tgt_nl}")
 
     if "indent" in layout_features:
-        src_indent = len(source_text) - len(source_text.lstrip())
-        tgt_indent = len(target_text) - len(target_text.lstrip())
+        # Only the first line carries the block indent; leading spaces on later
+        # lines are content, not layout.
+        src_first = source_text.split("\n", 1)[0]
+        tgt_first = target_text.split("\n", 1)[0]
+        src_indent = len(src_first) - len(src_first.lstrip())
+        tgt_indent = len(tgt_first) - len(tgt_first.lstrip())
         if (src_indent > 0) != (tgt_indent > 0):
             issues.append("缩进风格不一致")
 
@@ -306,10 +328,15 @@ def check_syllable_order(
     if not isinstance(output, dict):
         return {"is_valid": False, "note": "output is not a JSON object"}
 
-    syllables = [
-        cal_syllable_count(output.get(str(i), ""), tgt_lang)
-        for i in range(1, len(durations) + 1)
-    ]
+    syllables = []
+    for i in range(1, len(durations) + 1):
+        sentence = output.get(str(i))
+        if not isinstance(sentence, str) or not sentence.strip():
+            # A missing or empty sentence has no syllable count, and two of them
+            # trivially "agree": they used to pass the concordance check.
+            return {"is_valid": False,
+                    "note": f"译文第{i}句缺失或为空，无法比较音节数"}
+        syllables.append(cal_syllable_count(sentence, tgt_lang))
     if len(syllables) < 2:
         return {"is_valid": True, "note": "too few sentences"}
 
