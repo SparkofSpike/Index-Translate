@@ -154,6 +154,11 @@ def main() -> None:
             "segale_source_unit_count": len(source_lines),
             "canonical_null_source_count": sum(not row["source"] for row in canonical_units),
             "canonical_null_reference_count": sum(not row["reference"] for row in canonical_units),
+            # Content fingerprints of the exact inputs this adapter scored:
+            # the summarizer re-binds the caller's current cases/generations to
+            # these before trusting a COMET sidecar produced from this manifest.
+            "source_sha256": sha_text(case["source"]),
+            "reference_sha256": sha_text(case["reference"]),
             "segale_rendering": "non-null-source units in canonical order; canonical units remain in release alignment-units.jsonl",
             "generation": {key: run.get(key) for key in (
                 "finish_reason", "input_tokens", "output_tokens", "cap_hit",

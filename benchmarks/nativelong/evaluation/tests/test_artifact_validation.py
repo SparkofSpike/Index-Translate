@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import types
@@ -47,6 +48,7 @@ def stub_heavy_dependencies() -> None:
 
 stub_heavy_dependencies()
 import evaluate_comet as ec  # noqa: E402
+import prepare_document_segale as prepare  # noqa: E402
 import summarize_document_segale as sds  # noqa: E402
 import run as runner  # noqa: E402
 
@@ -231,6 +233,234 @@ def test_empty_selection_comet_run_passes_validation(tmp_path: Path):
     comet_dir = tmp_path / "comet"
     runner.write_empty_comet_run(comet_dir, inputs)
     sds.verify_comet_artifacts(comet_dir / "summary.json", runner.SUITE_ID, runner.SYSTEM_KEY)
+
+
+def sha_hex(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def write_bound_comet_run(tmp_path: Path):
+    """A minimal results packet that carries per-case input bindings.
+
+    Scored translation is "T"; cases source/reference are "S"/"R".
+    """
+
+    aligned = tmp_path / "aligned.jsonl"
+    aligned.write_text("{}\n", encoding="utf-8")
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text(json.dumps({
+        "case_id": "a", "source": "S", "reference": "R",
+        "metadata": {}, "alignment_unit_count": 1}, ensure_ascii=False) + "\n",
+        encoding="utf-8")
+    generations = tmp_path / "generations.jsonl"
+    generations.write_text(json.dumps({
+        "case_id": "a", "mt": "T", "status": "ok",
+        "output_sha256": sha_hex("T")}, ensure_ascii=False) + "\n", encoding="utf-8")
+    summary = {
+        "schema_version": "document-comet-v1", "suite_id": "s", "system_key": "k",
+        "inputs": {"aligned_input": {
+            "path": str(aligned),
+            "sha256": hashlib.sha256(aligned.read_bytes()).hexdigest()}},
+        "cases": [{"case_id": "a", "comet": 0.5, "binding": {
+            "generation_output_sha256": sha_hex("T"),
+            "source_sha256": sha_hex("S"),
+            "reference_sha256": sha_hex("R")}}],
+    }
+    return write_comet_run(tmp_path / "comet", summary), cases, generations
+
+
+def run_summarize(cases: Path, generations: Path, comet_summary: Path, output: Path,
+                  *extra: str) -> None:
+    argv = sys.argv
+    sys.argv = ["summarize_document_segale.py", "--cases", str(cases),
+                "--generations", str(generations), "--comet-summary", str(comet_summary),
+                "--output", str(output), "--suite-id", "s", "--system-key", "k", *extra]
+    try:
+        sds.main()
+    finally:
+        sys.argv = argv
+
+
+def test_comet_binding_matches_only_current_inputs():
+    cases = [{"case_id": "a", "source": "S", "reference": "R"}]
+    generations = [{"case_id": "a", "mt": "T", "status": "ok"}]
+    binding = {"generation_output_sha256": sha_hex("T"), "source_sha256": sha_hex("S"),
+               "reference_sha256": sha_hex("R")}
+    sds.verify_comet_inputs({"cases": [{"case_id": "a", "binding": binding}]},
+                            cases, generations)  # control: matching inputs pass
+    for label, swapped_cases, swapped_generations in (
+        ("generations", cases, [{"case_id": "a", "mt": "T2", "status": "ok"}]),
+        ("cases", [{"case_id": "a", "source": "S2", "reference": "R"}], generations),
+    ):
+        try:
+            sds.verify_comet_inputs({"cases": [{"case_id": "a", "binding": binding}]},
+                                    swapped_cases, swapped_generations)
+        except ValueError as error:
+            assert "re-score" in str(error), error
+        else:  # pragma: no cover
+            raise AssertionError(f"edited {label} silently reused old scores")
+    try:
+        sds.verify_comet_inputs({"cases": [{"case_id": "a"}]}, cases, generations)
+    except ValueError as error:
+        assert "does not bind" in str(error), error
+    else:  # pragma: no cover
+        raise AssertionError("an unbound COMET summary must be rejected")
+
+
+def test_summarize_rejects_stale_generations_end_to_end(tmp_path: Path):
+    summary_path, cases, _ = write_bound_comet_run(tmp_path)
+    swapped = tmp_path / "generations-swapped.jsonl"
+    swapped.write_text(json.dumps({
+        "case_id": "a", "mt": "T2", "status": "ok",
+        "output_sha256": sha_hex("T2")}, ensure_ascii=False) + "\n", encoding="utf-8")
+    try:
+        run_summarize(cases, swapped, summary_path, tmp_path / "out.json")
+    except ValueError as error:
+        assert "re-score" in str(error), error
+    else:  # pragma: no cover
+        raise AssertionError("stale scores were reused with new translations")
+
+
+def test_relocated_comet_inputs_verify_with_override(tmp_path: Path):
+    summary_path, cases, generations = write_bound_comet_run(tmp_path)
+    moved = tmp_path / "moved" / "aligned.jsonl"
+    moved.parent.mkdir()
+    shutil.move(tmp_path / "aligned.jsonl", moved)
+    try:
+        run_summarize(cases, generations, summary_path, tmp_path / "out.json")
+    except ValueError as error:
+        assert "is missing" in str(error), error
+    else:  # pragma: no cover
+        raise AssertionError("a missing recorded input must be rejected")
+    run_summarize(cases, generations, summary_path, tmp_path / "out.json",
+                  "--comet-input", f"aligned_input={moved}")
+    assert (tmp_path / "out.json").is_file()
+
+
+def test_bundled_comet_input_copy_is_accepted(tmp_path: Path):
+    aligned = tmp_path / "aligned.jsonl"
+    aligned.write_text("{}\n", encoding="utf-8")
+    comet_dir = tmp_path / "comet"
+    (comet_dir / "inputs").mkdir(parents=True)
+    bundled = comet_dir / "inputs" / "manifest.json"
+    bundled.write_bytes(b'{"cases": []}')
+    summary = comet_summary({
+        "aligned_input": {"path": str(aligned),
+                          "sha256": hashlib.sha256(aligned.read_bytes()).hexdigest()},
+        "manifest": {"path": str(tmp_path / "gone" / "manifest.json"),
+                     "sha256": hashlib.sha256(bundled.read_bytes()).hexdigest(),
+                     "bundled": "inputs/manifest.json"},
+    }, [])
+    summary_path = write_comet_run(comet_dir, summary)
+    sds.verify_comet_artifacts(summary_path, "s", "k")  # bundled copy resolves
+    escaping = comet_summary({
+        "aligned_input": {"path": str(aligned),
+                          "sha256": hashlib.sha256(aligned.read_bytes()).hexdigest()},
+        "manifest": {"path": str(tmp_path / "gone" / "manifest.json"),
+                     "sha256": hashlib.sha256(bundled.read_bytes()).hexdigest(),
+                     "bundled": "../manifest.json"},
+    }, [])
+    escaping_path = write_comet_run(comet_dir, escaping)
+    try:
+        sds.verify_comet_artifacts(escaping_path, "s", "k")
+    except ValueError as error:
+        assert "is missing" in str(error), error
+    else:  # pragma: no cover
+        raise AssertionError("a bundled path escaping the packet must be ignored")
+
+
+def test_whole_packet_relocation_verifies(tmp_path: Path):
+    """Results packet and inputs moved together still verify at the new paths."""
+
+    root = tmp_path / "run-a"
+    root.mkdir()
+    aligned = root / "aligned.jsonl"
+    aligned.write_text("{}\n", encoding="utf-8")
+    cases = root / "cases.jsonl"
+    cases.write_text(json.dumps({
+        "case_id": "a", "source": "S", "reference": "R",
+        "metadata": {}, "alignment_unit_count": 1}, ensure_ascii=False) + "\n",
+        encoding="utf-8")
+    generations = root / "generations.jsonl"
+    generations.write_text(json.dumps({
+        "case_id": "a", "mt": "T", "status": "ok",
+        "output_sha256": sha_hex("T")}, ensure_ascii=False) + "\n", encoding="utf-8")
+    manifest = root / "adapter-manifest.json"
+    manifest.write_text(json.dumps({"cases": [{
+        "case_id": "a", "generation": {"output_sha256": sha_hex("T")},
+        "source_sha256": sha_hex("S"), "reference_sha256": sha_hex("R")}]}),
+        encoding="utf-8")
+    comet_dir = root / "comet"
+    (comet_dir / "inputs").mkdir(parents=True)
+    shutil.copyfile(manifest, comet_dir / "inputs" / "manifest.json")
+    summary = {
+        "schema_version": "document-comet-v1", "suite_id": "s", "system_key": "k",
+        "inputs": {
+            "aligned_input": {"path": str(aligned),
+                              "sha256": hashlib.sha256(aligned.read_bytes()).hexdigest()},
+            "manifest": {"path": str(manifest),
+                         "sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+                         "bundled": "inputs/manifest.json"},
+        },
+        "cases": [{"case_id": "a", "comet": 0.5, "binding": {
+            "generation_output_sha256": sha_hex("T"),
+            "source_sha256": sha_hex("S"),
+            "reference_sha256": sha_hex("R")}}],
+    }
+    summary_path = write_comet_run(comet_dir, summary)
+    moved = tmp_path / "run-b"
+    shutil.move(str(root), str(moved))
+    run_summarize(moved / "cases.jsonl", moved / "generations.jsonl",
+                  moved / "comet" / "summary.json", tmp_path / "out.json",
+                  "--comet-input", f"aligned_input={moved / 'aligned.jsonl'}")
+    assert (tmp_path / "out.json").is_file()
+
+
+def test_prepare_manifest_records_input_fingerprints(tmp_path: Path):
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text(json.dumps({
+        "case_id": "a", "source": "S", "reference": "R",
+        "alignment_unit_count": 1, "metadata": {}}, ensure_ascii=False) + "\n",
+        encoding="utf-8")
+    units = tmp_path / "units.jsonl"
+    units.write_text(json.dumps({
+        "case_id": "a", "alignment_unit_index": 0,
+        "source": "S", "reference": "R"}, ensure_ascii=False) + "\n", encoding="utf-8")
+    generations = tmp_path / "generations.jsonl"
+    generations.write_text(json.dumps({
+        "case_id": "a", "mt": "T", "status": "ok", "finish_reason": None,
+        "input_tokens": None, "output_tokens": None, "cap_hit": None,
+        "model_revision": None, "generation_config_sha256": None,
+        "output_sha256": sha_hex("T")}, ensure_ascii=False) + "\n", encoding="utf-8")
+    output_dir = tmp_path / "adapter"
+    argv = sys.argv
+    sys.argv = ["prepare_document_segale.py", "--cases", str(cases),
+                "--alignment-units", str(units), "--generations", str(generations),
+                "--output-dir", str(output_dir), "--suite-id", "s", "--system-key", "k"]
+    try:
+        prepare.main()
+    finally:
+        sys.argv = argv
+    record = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))["cases"][0]
+    assert record["source_sha256"] == sha_hex("S")
+    assert record["reference_sha256"] == sha_hex("R")
+    assert record["generation"]["output_sha256"] == sha_hex("T")
+
+
+def test_evaluate_comet_transcribes_and_bundles_inputs(tmp_path: Path):
+    manifest_cases = [{"case_id": "a", "generation": {"output_sha256": "0" * 64},
+                       "source_sha256": "1" * 64, "reference_sha256": "2" * 64}]
+    summaries = [{"case_id": "a", "comet": 0.5}]
+    ec.attach_bindings(summaries, manifest_cases)
+    assert summaries[0]["binding"] == {"generation_output_sha256": "0" * 64,
+                                       "source_sha256": "1" * 64,
+                                       "reference_sha256": "2" * 64}
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text('{"cases": []}', encoding="utf-8")
+    comet_dir = tmp_path / "comet"
+    relative = ec.bundle_manifest(comet_dir, manifest_path)
+    assert relative == "inputs/manifest.json"
+    assert (comet_dir / relative).read_bytes() == manifest_path.read_bytes()
 
 
 def test_five_band_macro_exposes_scored_with_comet():

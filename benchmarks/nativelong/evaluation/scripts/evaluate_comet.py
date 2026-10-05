@@ -15,6 +15,7 @@ import importlib.metadata
 import json
 import platform
 import re
+import shutil
 import statistics
 import time
 from collections import Counter, defaultdict
@@ -597,6 +598,39 @@ def metric_statuses(aggregate: dict) -> dict:
     }
 
 
+def attach_bindings(summaries: list[dict], manifest_cases: list[dict]) -> None:
+    """Carry scored-input fingerprints from the adapter manifest into the summary.
+
+    The summarizer re-binds the caller's current cases/generations to these
+    digests before trusting a COMET sidecar, so the fingerprints have to travel
+    inside the results packet (protected by the artifact manifest hash) instead
+    of relying on the adapter manifest still being reachable at its old path.
+    """
+
+    by_case_id = {str(case["case_id"]): case for case in manifest_cases}
+    for item in summaries:
+        case = by_case_id.get(str(item["case_id"]))
+        generation = case.get("generation", {}) if case else {}
+        item["binding"] = {
+            "generation_output_sha256": generation.get("output_sha256"),
+            "source_sha256": case.get("source_sha256") if case else None,
+            "reference_sha256": case.get("reference_sha256") if case else None,
+        }
+
+
+def bundle_manifest(comet_dir: Path, manifest_path: Path) -> str:
+    """Copy the adapter manifest into the results packet; return its relative path.
+
+    The copy is what the summarizer accepts as a relocatable input when the
+    recorded absolute path no longer exists on the machine reading the packet.
+    """
+
+    bundled = comet_dir / "inputs" / "manifest.json"
+    bundled.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(manifest_path, bundled)
+    return "inputs/manifest.json"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-file", type=Path, required=True)
@@ -783,6 +817,7 @@ def main() -> None:
         )
         for doc_id, doc_rows in grouped.items()
     ]
+    attach_bindings(summaries, manifest_cases)
     manifest_order = {str(case["case_id"]): index for index, case in enumerate(manifest_cases)}
     summaries.sort(
         key=lambda item: (
@@ -807,6 +842,7 @@ def main() -> None:
         "manifest": {
             "path": str(args.manifest.absolute()),
             "sha256": sha256_file(args.manifest),
+            "bundled": bundle_manifest(args.output_dir, args.manifest),
         },
     }
     if args.target_sentences:
