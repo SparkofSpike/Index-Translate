@@ -98,6 +98,7 @@ def collect_soft_constraint_descs(
 # count as present; the previous ASCII-only class accepted these neighbours and
 # a narrowed class must not regress them.
 _NO_SPACE_SCRIPTS = (
+    r"\u3000-\u303f"                            # CJK symbols (々, 〆, 〇, ...)
     r"\u3040-\u309f\u30a0-\u30ff"              # hiragana, katakana
     r"\u31f0-\u31ff\uff66-\uff9f"               # kana phonetic ext, half-width katakana
     r"\u3400-\u4dbf\u4e00-\u9fff"              # Han (Ext-A + URO)

@@ -70,6 +70,8 @@ check("glossary hangul-adjacent", check_glossary("이것은GPT-4입니다", ["GP
 check("glossary thai-adjacent", check_glossary("นี่คือGPT-4ครับ", ["GPT-4"])["is_valid"], True)
 check("glossary halfwidth-katakana-adjacent", check_glossary("ﾃﾞﾓGPT-4です", ["GPT-4"])["is_valid"], True)
 check("glossary ext-b-adjacent", check_glossary("\U00020000GPT-4", ["GPT-4"])["is_valid"], True)
+check("glossary iteration-mark-adjacent", check_glossary("々GPT-4", ["GPT-4"])["is_valid"], True)
+check("glossary halfwidth-both-sides", check_glossary("ｶﾀGPT-4ｶﾅ", ["GPT-4"])["is_valid"], True)
 
 section("2 markdown trigger")
 check("md ordered-list", check_format_preserve("1. alpha\n2. beta", "甲\n乙")["is_valid"], False)
