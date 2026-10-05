@@ -96,12 +96,17 @@ def verify_comet_artifacts(
                 try:
                     target = candidate.resolve()
                     root = comet_dir.resolve()
-                except OSError:
+                except (OSError, RuntimeError):
+                    # resolve() raises RuntimeError (not OSError) on a symlink
+                    # loop; either way, fall back to the lexical path and let
+                    # the is_file()/hash checks reject the candidate.
                     target = candidate
                     root = comet_dir
                 if target.is_relative_to(root):
                     candidates.append(candidate)
         recorded = record.get("path")
+        if recorded is not None and not isinstance(recorded, str):
+            raise ValueError(f"COMET input record {name} has a non-string path: {recorded!r}")
         if recorded:
             candidates.append(Path(recorded))
         chosen = next((path for path in candidates if path.is_file()), None)

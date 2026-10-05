@@ -444,6 +444,46 @@ def test_corrupt_comet_metadata_raises_controlled_errors(tmp_path: Path):
             raise AssertionError(f"main() must reject malformed cases: {cases_value!r}")
 
 
+def test_bundled_symlink_loop_is_a_controlled_error(tmp_path: Path):
+    """A self-referencing symlink must fail closed, not raise RuntimeError."""
+
+    comet_dir = tmp_path / "comet"
+    (comet_dir / "inputs").mkdir(parents=True)
+    loop = comet_dir / "inputs" / "loop"
+    try:
+        loop.symlink_to(loop)
+    except (OSError, NotImplementedError):  # pragma: no cover
+        return  # platform without symlink support: nothing to observe
+    summary = comet_summary({
+        "in": {"path": str(tmp_path / "gone" / "in"),
+               "sha256": "0" * 64,
+               "bundled": "inputs/loop"},
+    }, [])
+    summary_path = write_comet_run(comet_dir, summary)
+    try:
+        sds.verify_comet_artifacts(summary_path, "s", "k")
+    except ValueError as error:
+        assert "is missing" in str(error), error
+    else:  # pragma: no cover
+        raise AssertionError("a symlink loop must be rejected as missing, not crash")
+
+
+def test_non_string_recorded_path_is_a_controlled_error(tmp_path: Path):
+    """A forged packet whose recorded path is not a string must not TypeError."""
+
+    for index, bad in enumerate((5, ["x"])):
+        run_dir = tmp_path / f"comet-{index}"
+        summary_path = write_comet_run(run_dir, comet_summary({
+            "in": {"path": bad, "sha256": "0" * 64},
+        }, []))
+        try:
+            sds.verify_comet_artifacts(summary_path, "s", "k")
+        except ValueError as error:
+            assert "non-string path" in str(error), (bad, error)
+        else:  # pragma: no cover
+            raise AssertionError(f"a non-string path must be rejected: {bad!r}")
+
+
 def test_whole_packet_relocation_verifies(tmp_path: Path):
     """Results packet and inputs moved together still verify at the new paths."""
 
