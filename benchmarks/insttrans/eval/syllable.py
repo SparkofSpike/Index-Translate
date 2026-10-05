@@ -366,15 +366,26 @@ def _expand_number(num_str, lang):
 
     n2w_lang = _NUM2WORDS_LANG_MAP.get(lang, 'en')
 
+    # 序数（2nd、22nd）：按序数读法展开，否则 2nd 会被读成 "two"
+    if ordinal_suffix:
+        try:
+            return num2words(n, lang=n2w_lang, to='ordinal')
+        except Exception:
+            return num2words(n, lang='en', to='ordinal')
+
     # 中文：逐位读数字（如电话号码、年份等场景更常见）
     if lang == 'zh':
         _ZH_DIGITS = '零一二三四五六七八九'
         return ''.join(_ZH_DIGITS[int(d)] for d in num_str_clean)
 
     try:
-        return num2words(n, lang=n2w_lang)
+        try:
+            return num2words(n, lang=n2w_lang)
+        except Exception:
+            return num2words(n, lang='en')
     except Exception:
-        return num2words(n, lang='en')
+        # 两种语言都展开失败时退回原数字串，不能把异常抛给调用方
+        return num_str_clean
 
 
 def _expand_decimal(text, lang):
@@ -453,8 +464,13 @@ def _is_spelled_out_acronym(word):
     return False
 
 
-def _abbreviation_syllable_count(word, lang='en'):
-    """计算缩写/品牌名的音节数"""
+def _abbreviation_syllable_count(word, lang='en', context_has_lowercase=True):
+    """计算缩写/品牌名的音节数
+
+    context_has_lowercase=False 表示整段文本里没有一个普通小写词（如
+    "FREE NEW ITEMS"）：这时全大写是排版风格而不是缩写，返回 None 交给普通
+    音节规则处理。
+    """
     # 规范化：去除尾部标点
     clean = word.rstrip('.,;:!?()[]{}"\'-')
 
@@ -466,6 +482,10 @@ def _abbreviation_syllable_count(word, lang='en'):
     upper = clean.upper()
     if upper in _WORD_ACRONYMS:
         return _WORD_ACRONYMS[upper]
+
+    # 全大写词只在有小写上下文时才逐字母拼读
+    if clean.isupper() and 2 <= len(clean) <= 6 and not context_has_lowercase:
+        return None
 
     # 逐字母拼读的缩写（使用规范化后的 token）
     if _is_spelled_out_acronym(clean):
@@ -720,7 +740,7 @@ _SPANISH_SYLLABLES = {
     'río': 2,       # rí-o
     'pingüino': 3,  # pin-güi-no
     'día': 2,       # dí-a
-    'María': 3,     # Ma-rí-a
+    'maría': 3,     # Ma-rí-a
     'había': 3,     # ha-bí-a
     'tenía': 3,     # te-ní-a
     'podía': 3,     # po-dí-a
@@ -729,7 +749,7 @@ _SPANISH_SYLLABLES = {
     'raíz': 2,      # ra-íz
     'maíz': 2,      # ma-íz
     'baúl': 2,      # ba-úl
-    'Raúl': 2,      # Ra-úl
+    'raúl': 2,      # Ra-úl
 }
 
 _PYPHEN_LANG_MAP = {
@@ -747,6 +767,14 @@ def _count_european(text, lang):
     segments = _parse_mixed_content(text)
     total = 0
 
+    # 整段都是全大写词（标题、口号）时按普通词计数；只要出现一个小写词，
+    # 全大写 token 仍按缩写逐字母读（USA = 3）。
+    _latin_words = [w for seg, kind in segments if kind == 'latin' for w in seg.split()]
+    _alpha_words = [w for w in _latin_words if any(c.isalpha() for c in w)]
+    _ordinary_caps = len(_alpha_words) >= 2 and all(
+        w.rstrip('.,;:!?()[]{}"\'-').isupper() for w in _alpha_words
+    )
+
     for segment, script_type in segments:
         if script_type == 'number':
             expanded = _expand_number(segment, lang)
@@ -759,14 +787,18 @@ def _count_european(text, lang):
         elif script_type == 'latin':
             words = segment.split()
             for w in words:
-                abbr_count = _abbreviation_syllable_count(w, lang)
+                abbr_count = _abbreviation_syllable_count(
+                    w, lang, context_has_lowercase=not _ordinary_caps)
                 if abbr_count is not None:
                     total += abbr_count
+                elif w.isupper():
+                    # 全大写普通词按小写查连字符词典（词典只有小写形式）
+                    total += _pyphen_syllable_count(w.lower(), pyphen_lang)
                 else:
                     total += _pyphen_syllable_count(w, pyphen_lang)
         elif script_type == 'han':
-            # 只计算汉字，不包括标点
-            han_chars = re.findall(r'[一-鿿]', segment)
+            # 只计算汉字，不包括标点；范围与 _SCRIPT_RANGES 的 han 一致
+            han_chars = re.findall(r'[一-鿿㐀-䶿]', segment)
             total += len(han_chars)
         elif script_type == 'arabic':
             # 混合内容中的阿拉伯语
