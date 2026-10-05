@@ -72,6 +72,12 @@ check("glossary halfwidth-katakana-adjacent", check_glossary("ﾃﾞﾓGPT-4で�
 check("glossary ext-b-adjacent", check_glossary("\U00020000GPT-4", ["GPT-4"])["is_valid"], True)
 check("glossary iteration-mark-adjacent", check_glossary("々GPT-4", ["GPT-4"])["is_valid"], True)
 check("glossary halfwidth-both-sides", check_glossary("ｶﾀGPT-4ｶﾅ", ["GPT-4"])["is_valid"], True)
+check("glossary kana-ext-b-adjacent", check_glossary("\U0001AFF0GPT-4", ["GPT-4"])["is_valid"], True)
+check("glossary kana-supplement-adjacent", check_glossary("\U0001B000GPT-4", ["GPT-4"])["is_valid"], True)
+check("glossary hentaigana-adjacent", check_glossary("\U0001B001GPT-4", ["GPT-4"])["is_valid"], True)
+check("glossary halfwidth-hangul-adjacent", check_glossary("\uffa1GPT-4", ["GPT-4"])["is_valid"], True)
+check("glossary compat-supplement-adjacent", check_glossary("\U0002F800GPT-4", ["GPT-4"])["is_valid"], True)
+check("glossary ext-i-adjacent", check_glossary("\U0002EBF0GPT-4", ["GPT-4"])["is_valid"], True)
 
 section("2 markdown trigger")
 check("md ordered-list", check_format_preserve("1. alpha\n2. beta", "甲\n乙")["is_valid"], False)
