@@ -425,6 +425,17 @@ def _common_english_words():
     return _en_common_words_cache
 
 
+_APOSTROPHE_VARIANTS = str.maketrans({
+    "\u2018": "'", "\u2019": "'", "\u02bc": "'", "\u02b9": "'",
+    "\uff07": "'", "\u05f3": "'",
+})
+
+
+def _normalize_apostrophes(text):
+    """把各种排版撇号归一化为 ASCII '，便于查词表。"""
+    return text.translate(_APOSTROPHE_VARIANTS)
+
+
 # 作为完整单词发音的缩写（不逐字母读）及其音节数
 _WORD_ACRONYMS = {
     'NASA': 2, 'NATO': 2, 'ASAP': 4, 'IKEA': 3, 'OPEC': 2,
@@ -509,14 +520,19 @@ def _abbreviation_syllable_count(word, lang='en', context_has_lowercase=True):
     if upper in _WORD_ACRONYMS:
         return _WORD_ACRONYMS[upper]
 
-    # 全大写词只在有小写上下文时才逐字母拼读；没有小写上下文时，
-    # 仅词表命中的普通词按词读，其余仍按 initialism 逐字母读。
+    # 全大写词只在有小写上下文时才逐字母拼读；没有小写上下文时，仅词表
+    # 命中的普通词按词读，其余仍按 initialism 逐字母读。撇号形（DON'T /
+    # IT'S / WOULDN'T）不可能是逐字母缩写，任何上下文都按词表判定。
     # The lookup normalizes typographic apostrophes so DON'T / IT'S match
     # the list's ASCII entries.
-    if clean.isupper() and 2 <= len(clean) <= 6 and not context_has_lowercase:
-        normalized = clean.lower().replace("\u2019", "'").replace("\u02bc", "'")
-        if lang != 'en' or normalized in _common_english_words():
-            return None
+    if clean.isupper():
+        normalized = _normalize_apostrophes(clean.lower())
+        if "'" in normalized:
+            if lang != 'en' or normalized in _common_english_words():
+                return None
+        elif 2 <= len(clean) <= 6 and not context_has_lowercase:
+            if lang != 'en' or normalized in _common_english_words():
+                return None
 
     # 逐字母拼读的缩写（使用规范化后的 token）
     if _is_spelled_out_acronym(clean):
@@ -791,6 +807,18 @@ _PYPHEN_LANG_MAP = {
 }
 
 
+def _ordinary_caps_context(text):
+    """整段都是全大写词（标题、口号）时为真：此时全大写 token 按普通词计数，
+    否则仍按缩写逐字母读（USA = 3）。_count_european 与 cal_syllable_details
+    共用同一判定，保证 total 与逐词 breakdown 口径一致。"""
+    segments = _parse_mixed_content(text)
+    latin_words = [w for seg, kind in segments if kind == 'latin' for w in seg.split()]
+    alpha_words = [w for w in latin_words if any(c.isalpha() for c in w)]
+    return len(alpha_words) >= 2 and all(
+        w.rstrip('.,;:!?()[]{}"\'-').isupper() for w in alpha_words
+    )
+
+
 def _count_european(text, lang):
     """英、德、法、西等欧洲语言的音节计数"""
     pyphen_lang = _PYPHEN_LANG_MAP.get(lang, 'en_US')
@@ -800,11 +828,7 @@ def _count_european(text, lang):
 
     # 整段都是全大写词（标题、口号）时按普通词计数；只要出现一个小写词，
     # 全大写 token 仍按缩写逐字母读（USA = 3）。
-    _latin_words = [w for seg, kind in segments if kind == 'latin' for w in seg.split()]
-    _alpha_words = [w for w in _latin_words if any(c.isalpha() for c in w)]
-    _ordinary_caps = len(_alpha_words) >= 2 and all(
-        w.rstrip('.,;:!?()[]{}"\'-').isupper() for w in _alpha_words
-    )
+    _ordinary_caps = _ordinary_caps_context(text)
 
     for segment, script_type in segments:
         if script_type == 'number':
@@ -1014,6 +1038,9 @@ def cal_syllable_details(text, lang='en'):
     text = text.strip()
     total_syllables = cal_syllable_count(text, lang)
 
+    # 逐词 breakdown 与 total 共用同一套全大写上下文判定，避免口径不一。
+    context_has_lowercase = not _ordinary_caps_context(text)
+
     # 根据语言使用不同的分解策略
     breakdown = []
 
@@ -1036,7 +1063,7 @@ def cal_syllable_details(text, lang='en'):
             elif script_type == 'latin':
                 words = segment.split()
                 for w in words:
-                    abbr_count = _abbreviation_syllable_count(w, 'en')
+                    abbr_count = _abbreviation_syllable_count(w, 'en', context_has_lowercase=context_has_lowercase)
                     if abbr_count is not None:
                         syllables = abbr_count
                     else:
@@ -1085,7 +1112,7 @@ def cal_syllable_details(text, lang='en'):
             elif script_type == 'latin':
                 words = segment.split()
                 for w in words:
-                    abbr_count = _abbreviation_syllable_count(w, 'en')
+                    abbr_count = _abbreviation_syllable_count(w, 'en', context_has_lowercase=context_has_lowercase)
                     if abbr_count is not None:
                         syllables = abbr_count
                     else:
@@ -1126,7 +1153,7 @@ def cal_syllable_details(text, lang='en'):
             elif script_type == 'latin':
                 words = segment.split()
                 for w in words:
-                    abbr_count = _abbreviation_syllable_count(w, 'en')
+                    abbr_count = _abbreviation_syllable_count(w, 'en', context_has_lowercase=context_has_lowercase)
                     if abbr_count is not None:
                         syllables = abbr_count
                     else:
@@ -1164,7 +1191,7 @@ def cal_syllable_details(text, lang='en'):
             elif script_type == 'latin':
                 words = segment.split()
                 for w in words:
-                    abbr_count = _abbreviation_syllable_count(w, lang)
+                    abbr_count = _abbreviation_syllable_count(w, lang, context_has_lowercase=context_has_lowercase)
                     if abbr_count is not None:
                         syllables = abbr_count
                     else:

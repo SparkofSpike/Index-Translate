@@ -117,6 +117,16 @@ check("caps no-lowercase word reads as word", cal_syllable_count("FREE NEW ITEMS
 check("single caps acronym kept", cal_syllable_count("USA", "en"), 3)
 check("caps acronym flag on", _abbreviation_syllable_count("USA", "en", True), 3)
 check("caps acronym flag off", _abbreviation_syllable_count("FREE", "en", False), None)
+check("caps contraction single word", cal_syllable_count("DON'T", "en"), 1)
+check("caps contraction single word IT'S", cal_syllable_count("IT'S", "en"), 1)
+check("caps contraction U+2018 variant", cal_syllable_count("DON\u2018T STOP", "en"), 2)
+check("caps contraction fullwidth variant", cal_syllable_count("DON\uff07T STOP", "en"), 2)
+check("caps contraction U+02B9 variant", cal_syllable_count("DON\u02b9T STOP", "en"), 2)
+check("caps contraction U+05F3 variant", cal_syllable_count("DON\u05f3T STOP", "en"), 2)
+_details = syl.cal_syllable_details("DON'T STOP", "en")
+check("details breakdown sums to total",
+      sum(item["syllables"] for item in _details["syllable_breakdown"]),
+      _details["total_syllables"])
 check("spanish dict lowercase key", cal_syllable_count("María", "es"), 3)
 check("spanish word in text", cal_syllable_count("Hola María", "es"), 5)
 
