@@ -511,8 +511,11 @@ def _abbreviation_syllable_count(word, lang='en', context_has_lowercase=True):
 
     # 全大写词只在有小写上下文时才逐字母拼读；没有小写上下文时，
     # 仅词表命中的普通词按词读，其余仍按 initialism 逐字母读。
+    # The lookup normalizes typographic apostrophes so DON'T / IT'S match
+    # the list's ASCII entries.
     if clean.isupper() and 2 <= len(clean) <= 6 and not context_has_lowercase:
-        if lang != 'en' or clean.lower() in _common_english_words():
+        normalized = clean.lower().replace("\u2019", "'").replace("\u02bc", "'")
+        if lang != 'en' or normalized in _common_english_words():
             return None
 
     # 逐字母拼读的缩写（使用规范化后的 token）

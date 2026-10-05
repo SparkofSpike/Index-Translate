@@ -99,8 +99,13 @@ def collect_soft_constraint_descs(
 # a narrowed class must not regress them.
 _NO_SPACE_SCRIPTS = (
     r"\u3040-\u309f\u30a0-\u30ff"              # hiragana, katakana
-    r"\u3400-\u4dbf\u4e00-\u9fff"              # Han (incl. Ext-A)
+    r"\u31f0-\u31ff\uff66-\uff9f"               # kana phonetic ext, half-width katakana
+    r"\u3400-\u4dbf\u4e00-\u9fff"              # Han (Ext-A + URO)
+    r"\uf900-\ufaff"                            # CJK compatibility ideographs
+    r"\U00020000-\U0002ebef"                    # supplementary ideographs (Ext-B..F)
+    r"\U00030000-\U000323af"                    # supplementary ideographs (Ext-G/H)
     r"\uac00-\ud7a3\u1100-\u11ff\u3130-\u318f"  # Hangul syllables, Jamo, compat jamo
+    r"\ua960-\ua97f\ud7b0-\ud7ff"               # Hangul Jamo Ext-A/B
     r"\u0e00-\u0e7f"                            # Thai
 )
 _NO_SPACE_CHAR = re.compile(f"[{_NO_SPACE_SCRIPTS}]")
