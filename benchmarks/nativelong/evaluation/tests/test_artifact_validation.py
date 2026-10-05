@@ -361,6 +361,11 @@ def test_bundled_comet_input_copy_is_accepted(tmp_path: Path):
                      "bundled": "../manifest.json"},
     }, [])
     escaping_path = write_comet_run(comet_dir, escaping)
+    # Create the escape target so the traversal guard is observable: without the
+    # ".." check this file would be picked up as a candidate and fail as a hash
+    # mismatch instead of the expected "is missing".
+    escape_target = tmp_path / "manifest.json"
+    escape_target.write_bytes(b'{"cases": ["should not be read"]}')
     try:
         sds.verify_comet_artifacts(escaping_path, "s", "k")
     except ValueError as error:
