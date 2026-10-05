@@ -374,6 +374,76 @@ def test_bundled_comet_input_copy_is_accepted(tmp_path: Path):
         raise AssertionError("a bundled path escaping the packet must be ignored")
 
 
+def test_bundled_symlink_escaping_the_packet_is_rejected(tmp_path: Path):
+    """A packet-local symlink must not let the verifier hash files outside it."""
+
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"CANARY")
+    comet_dir = tmp_path / "comet"
+    (comet_dir / "inputs").mkdir(parents=True)
+    link = comet_dir / "inputs" / "in"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):  # pragma: no cover
+        return  # platform without symlink support: nothing to observe
+    summary = comet_summary({
+        "in": {"path": str(tmp_path / "gone" / "in"),
+               "sha256": hashlib.sha256(outside.read_bytes()).hexdigest(),
+               "bundled": "inputs/in"},
+    }, [])
+    summary_path = write_comet_run(comet_dir, summary)
+    try:
+        sds.verify_comet_artifacts(summary_path, "s", "k")
+    except ValueError as error:
+        assert "is missing" in str(error), error
+    else:  # pragma: no cover
+        raise AssertionError("a symlink escaping the packet must not be followed")
+
+
+def test_corrupt_comet_metadata_raises_controlled_errors(tmp_path: Path):
+    """Internally consistent forgeries must fail closed, never crash mid-run."""
+
+    source = tmp_path / "aligned.jsonl"
+    source.write_text("{}\n", encoding="utf-8")
+    inputs = {"aligned_input": {"path": str(source),
+                                "sha256": hashlib.sha256(source.read_bytes()).hexdigest()}}
+    run_dir = tmp_path / "comet"
+    summary_path = write_comet_run(run_dir, comet_summary(inputs, []))
+    # A completed marker without its manifest hash: formerly an uncaught KeyError.
+    (run_dir / "COMPLETED.json").write_text(
+        json.dumps({"status": "completed"}), encoding="utf-8")
+    try:
+        sds.verify_comet_artifacts(summary_path, "s", "k")
+    except ValueError as error:
+        assert "artifact manifest hash" in str(error), error
+    else:  # pragma: no cover
+        raise AssertionError("a completed marker without a hash must be rejected")
+    # Malformed cases fields: formerly KeyError/TypeError from main().
+    for cases_value, expected in (({}, "cases must be a list"),
+                                  (5, "cases must be a list"),
+                                  ("cases", "cases must be a list"),
+                                  ([{"comet": 0.5}], "case_id")):
+        write_comet_run(run_dir, comet_summary(inputs, cases_value))
+        try:
+            sds.verify_comet_artifacts(summary_path, "s", "k")
+        except ValueError as error:
+            assert expected in str(error), (cases_value, error)
+        else:  # pragma: no cover
+            raise AssertionError(f"malformed cases must be rejected: {cases_value!r}")
+        # The same packet must fail through main() as a controlled ValueError too.
+        cases_file = tmp_path / "cases.jsonl"
+        cases_file.write_text("", encoding="utf-8")
+        generations_file = tmp_path / "generations.jsonl"
+        generations_file.write_text("", encoding="utf-8")
+        try:
+            run_summarize(cases_file, generations_file, summary_path,
+                          tmp_path / "out.json")
+        except ValueError as error:
+            assert expected in str(error), (cases_value, error)
+        else:  # pragma: no cover
+            raise AssertionError(f"main() must reject malformed cases: {cases_value!r}")
+
+
 def test_whole_packet_relocation_verifies(tmp_path: Path):
     """Results packet and inputs moved together still verify at the new paths."""
 

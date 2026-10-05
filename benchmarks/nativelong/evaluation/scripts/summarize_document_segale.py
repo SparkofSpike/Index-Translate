@@ -35,8 +35,9 @@ def verify_comet_artifacts(
     Recorded inputs are re-resolved by content instead of by the scoring
     machine's absolute path: an explicit caller override (``input_overrides``)
     or a relocatable copy bundled in the results packet (``inputs[name]["bundled"]``,
-    relative to the sidecar directory) is accepted before falling back to the
-    recorded path. A candidate that exists must hash to the recorded digest;
+    relative to the sidecar directory and only accepted while it resolves
+    inside it) is accepted before falling back to the recorded path. A candidate
+    that exists must hash to the recorded digest;
     when no candidate exists the run is rejected and the caller is told how to
     point at the current location.
     """
@@ -51,15 +52,29 @@ def verify_comet_artifacts(
     artifact_path = comet_dir / "artifact-manifest.json"
     if not artifact_path.is_file():
         raise ValueError(f"COMET run has no artifact manifest: {artifact_path}")
-    if completed["artifact_manifest_sha256"] != sha_file(artifact_path):
+    manifest_digest = completed.get("artifact_manifest_sha256")
+    if not isinstance(manifest_digest, str):
+        raise ValueError("COMET completed marker records no artifact manifest hash")
+    if manifest_digest != sha_file(artifact_path):
         raise ValueError("COMET artifact manifest hash mismatch")
     artifacts = json.loads(artifact_path.read_text(encoding="utf-8"))
+    if not isinstance(artifacts, dict):
+        raise ValueError("COMET artifact manifest is not an object")
     for name in ("summary.json", "per_window.jsonl"):
-        if artifacts[name] != sha_file(comet_dir / name):
+        digest = artifacts.get(name)
+        if not isinstance(digest, str):
+            raise ValueError(f"COMET artifact manifest records no hash for {name}")
+        if digest != sha_file(comet_dir / name):
             raise ValueError("COMET artifact hash mismatch")
     summary = json.loads(Path(comet_summary).read_text(encoding="utf-8"))
     if summary.get("suite_id") != suite_id or summary.get("system_key") != system_key:
         raise ValueError("COMET run identity mismatch")
+    scores = summary.get("cases")
+    if not isinstance(scores, list):
+        raise ValueError("COMET summary cases must be a list")
+    for row in scores:
+        if not isinstance(row, dict) or not isinstance(row.get("case_id"), str):
+            raise ValueError("COMET summary case entries must be objects with a case_id")
     inputs = summary.get("inputs")
     if not isinstance(inputs, dict) or not inputs:
         raise ValueError("COMET summary records no input hashes")
@@ -75,7 +90,17 @@ def verify_comet_artifacts(
         if isinstance(bundled, str) and bundled:
             bundled_path = Path(bundled)
             if not bundled_path.is_absolute() and ".." not in bundled_path.parts:
-                candidates.append(comet_dir / bundled_path)
+                candidate = comet_dir / bundled_path
+                # A packet-local symlink can still point outside the packet;
+                # accept the copy only while its resolved target stays inside.
+                try:
+                    target = candidate.resolve()
+                    root = comet_dir.resolve()
+                except OSError:
+                    target = candidate
+                    root = comet_dir
+                if target.is_relative_to(root):
+                    candidates.append(candidate)
         recorded = record.get("path")
         if recorded:
             candidates.append(Path(recorded))
