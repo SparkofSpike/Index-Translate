@@ -31,6 +31,7 @@ from comet import download_model, load_from_checkpoint  # noqa: E402
 
 
 POSITION_BUCKETS = ("beginning", "middle", "end")
+UNCLASSIFIED_WINDOW = "unclassified"
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -46,6 +47,26 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def resolve_checkpoint_sha256(
+    model_path: Path | None, declared: str | None
+) -> tuple[str | None, str | None]:
+    """Return (declared, observed) checkpoint digests; verify any declaration.
+
+    The observed digest is always computed from the checkpoint actually loaded,
+    so a run can never report a declaration it did not honour.
+    """
+
+    if model_path is None:
+        return declared, None
+    observed = sha256_file(model_path)
+    if declared and declared != observed:
+        raise ValueError(
+            "--model-checkpoint-sha256 mismatch: "
+            f"declared={declared} observed={observed} path={model_path}"
+        )
+    return declared, observed
+
+
 def classify_window(row: dict) -> str:
     src = row.get("src", "")
     ref = row.get("ref", "")
@@ -58,10 +79,9 @@ def classify_window(row: dict) -> str:
         return "over_translation_null"
     if src and not ref:
         return "canonical_null_reference"
-    raise ValueError(
-        f"Unexpected empty-field pattern in {row.get('doc_id')} segment {row.get('seg_id')}: "
-        f"src={bool(src)} ref={bool(ref)} tgt={bool(hypothesis)}"
-    )
+    # An unrecognised empty-field pattern is recorded as a counted status and
+    # scored null instead of aborting the whole run on one malformed window.
+    return UNCLASSIFIED_WINDOW
 
 
 def mean(values: Iterable[float | None]) -> float | None:
@@ -252,6 +272,13 @@ def summarize_bucket(rows: list[dict]) -> dict:
 
 
 def summarize_probe(doc_rows: list[dict], probe: dict | None) -> dict | None:
+    """Summarize a probe selection, recording failure instead of aborting the run.
+
+    A probe that selects no aligned window is reported with
+    status="no_windows_selected"; the document and corpus aggregates keep their
+    normal basis and the run stays inspectable.
+    """
+
     if not probe:
         return None
     sentence_start = probe.get("source_sentence_start")
@@ -287,11 +314,11 @@ def summarize_probe(doc_rows: list[dict], probe: dict | None) -> dict | None:
                 )
             if include:
                 selected.append(row)
-        if not selected:
-            raise ValueError(f"Probe selected no aligned windows: {probe}")
         return {
             "probe_id": probe.get("probe_id"),
             "source_sha256": probe.get("source_sha256"),
+            "status": "selected" if selected else "no_windows_selected",
+            "coordinate_basis": "source_sentence_index_over_original_source_lines",
             "source_char_start": probe.get("source_char_start"),
             "source_char_end": probe.get("source_char_end"),
             "source_sentence_start": sentence_start,
@@ -308,7 +335,10 @@ def summarize_probe(doc_rows: list[dict], probe: dict | None) -> dict | None:
     end = probe.get("source_char_end")
     if not isinstance(start, int) or not isinstance(end, int) or not 0 <= start < end:
         raise ValueError(f"Invalid probe source span: {probe}")
-    source_total = sum(len(row.get("src", "")) for row in doc_rows)
+    # Row spans come from assign_source_positions, so the document total must be
+    # the same coordinate as those spans. Summing len(row['src']) would mix the
+    # VecAlign space-joined window text into original-source coordinates.
+    source_total = max((row.get("source_char_end", 0) for row in doc_rows), default=0)
     if end > source_total:
         raise ValueError(
             f"Probe span ends after aligned source: end={end} source_total={source_total}"
@@ -331,11 +361,11 @@ def summarize_probe(doc_rows: list[dict], probe: dict | None) -> dict | None:
             include = start <= row_start < end or row_start == end == source_total
         if include:
             selected.append(row)
-    if not selected:
-        raise ValueError(f"Probe selected no aligned windows: {probe}")
     return {
         "probe_id": probe.get("probe_id"),
         "source_sha256": probe.get("source_sha256"),
+        "status": "selected" if selected else "no_windows_selected",
+        "coordinate_basis": "aligned_source_characters",
         "source_char_start": start,
         "source_char_end": end,
         "selection_rule": (
@@ -393,6 +423,9 @@ def summarize_case(
         "windows": len(doc_rows),
         "evaluable_windows": len(evaluable_rows),
         "canonical_null_reference_windows": len(doc_rows) - len(evaluable_rows),
+        "unclassified_windows": sum(
+            row["alignment_type"] == UNCLASSIFIED_WINDOW for row in doc_rows
+        ),
         "aligned_windows": len(aligned_rows),
         "null_windows": len(null_rows),
         "under_translation_nulls": sum(
@@ -503,13 +536,26 @@ def aggregate_cases(cases: list[dict], rows: list[dict]) -> dict:
             for bucket in POSITION_BUCKETS
         },
     }
+    probe_summaries = [case["probe"] for case in cases if case.get("probe")]
     return {
         "documents": len(cases),
         "windows": len(rows),
         "evaluable_windows": len(evaluable_rows),
         "canonical_null_reference_windows": len(rows) - len(evaluable_rows),
+        "unclassified_windows": sum(
+            row["alignment_type"] == UNCLASSIFIED_WINDOW for row in rows
+        ),
         "aligned_windows": len(aligned_rows),
         "null_windows": len(null_rows),
+        "probe": {
+            "documents": len(probe_summaries),
+            "status_counts": dict(
+                sorted(Counter(p.get("status") for p in probe_summaries).items())
+            ),
+            "selected_documents": sum(
+                p.get("status") == "selected" for p in probe_summaries
+            ),
+        },
         "macro": macro,
         "weighted": weighted,
     }
@@ -556,6 +602,8 @@ def main() -> None:
     parser.add_argument("--input-file", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--suite-id", required=True)
+    parser.add_argument("--system-key", required=True)
     parser.add_argument("--model", default="Unbabel/wmt22-comet-da")
     parser.add_argument(
         "--model-checkpoint",
@@ -751,6 +799,28 @@ def main() -> None:
         for row in rows:
             stream.write(json.dumps(row, ensure_ascii=False) + "\n")
 
+    inputs = {
+        "aligned_input": {
+            "path": str(args.input_file.absolute()),
+            "sha256": sha256_file(args.input_file),
+        },
+        "manifest": {
+            "path": str(args.manifest.absolute()),
+            "sha256": sha256_file(args.manifest),
+        },
+    }
+    if args.target_sentences:
+        inputs["target_sentences"] = {
+            "path": str(args.target_sentences.absolute()),
+            "sha256": sha256_file(args.target_sentences),
+        }
+    declared_checkpoint_sha256, observed_checkpoint_sha256 = resolve_checkpoint_sha256(
+        model_path, args.model_checkpoint_sha256
+    )
+    unclassified_windows = sum(
+        row["alignment_type"] == UNCLASSIFIED_WINDOW for row in rows
+    )
+
     if mapped_source_documents == len(grouped):
         position_basis = (
             "window_midpoint_in_original_source_characters_after_ordered_sentence_mapping"
@@ -770,11 +840,10 @@ def main() -> None:
         "packages": package_versions(),
         "comet_model": args.model,
         "comet_checkpoint": str(model_path) if model_path else None,
-        "comet_checkpoint_sha256": (
-            args.model_checkpoint_sha256
-            if model_path and args.model_checkpoint_sha256
-            else sha256_file(model_path) if model_path else None
-        ),
+        "comet_checkpoint_sha256": observed_checkpoint_sha256
+        or declared_checkpoint_sha256,
+        "comet_checkpoint_sha256_declared": declared_checkpoint_sha256,
+        "comet_checkpoint_sha256_observed": observed_checkpoint_sha256,
         "comet_device": "cuda" if args.gpus else "cpu",
         "comet_gpus": args.gpus,
         "comet_batch_size": args.batch_size,
@@ -785,21 +854,31 @@ def main() -> None:
             str(args.target_sentences.absolute()) if args.target_sentences else None
         ),
         "target_sentences_sha256": (
-            sha256_file(args.target_sentences) if args.target_sentences else None
+            inputs["target_sentences"]["sha256"] if args.target_sentences else None
         ),
         "target_sentence_source": (
             "alignment_sidecar" if args.target_sentences else "scorer_spacy"
         ),
         "probe_window_basis": (
-            "mapped source-sentence-window midpoint; source-empty over-translation "
-            "window at sentence insertion cursor including document end; legacy "
-            "character fallback"
+            "mapped source-sentence-window midpoint over original source lines when "
+            "the probe and manifest carry sentence mapping; otherwise character "
+            "midpoint over aligned source_char_start/source_char_end coordinates"
         ),
+        "probe_selection_status_counts": dict(
+            sorted(
+                Counter(
+                    case["probe"].get("status")
+                    for case in summaries
+                    if case.get("probe")
+                ).items()
+            )
+        ),
+        "unclassified_window_count": unclassified_windows,
         "exact_duplicate_basis": "case-sensitive_text_after_whitespace_normalization",
-        "aligned_input": str(args.input_file.absolute()),
-        "aligned_input_sha256": sha256_file(args.input_file),
-        "manifest": str(args.manifest.absolute()),
-        "manifest_sha256": sha256_file(args.manifest),
+        "aligned_input": inputs["aligned_input"]["path"],
+        "aligned_input_sha256": inputs["aligned_input"]["sha256"],
+        "manifest": inputs["manifest"]["path"],
+        "manifest_sha256": inputs["manifest"]["sha256"],
         "phase_seconds": {
             "model_load": model_load_seconds,
             "prediction": prediction_seconds,
@@ -808,6 +887,10 @@ def main() -> None:
         },
     }
     result = {
+        "schema_version": "document-comet-v1",
+        "suite_id": args.suite_id,
+        "system_key": args.system_key,
+        "inputs": inputs,
         "experiment": manifest.get("experiment", {}),
         "runtime": runtime,
         "metrics": metric_statuses(aggregate),
@@ -816,6 +899,36 @@ def main() -> None:
     }
     (args.output_dir / "summary.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    # Zero-validation artifacts are what let a stale or partial COMET run pass
+    # silently, so a completed run ships the same triple as the chrF2 sidecar.
+    artifacts = {
+        name: sha256_file(args.output_dir / name)
+        for name in ("summary.json", "per_window.jsonl")
+    }
+    (args.output_dir / "artifact-manifest.json").write_text(
+        json.dumps(artifacts, indent=2) + "\n", encoding="utf-8"
+    )
+    (args.output_dir / "COMPLETED.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "scope": "document-comet-sidecar-only",
+                "artifact_manifest_sha256": sha256_file(
+                    args.output_dir / "artifact-manifest.json"
+                ),
+                "suite_id": args.suite_id,
+                "system_key": args.system_key,
+                "aggregate": {
+                    "documents": aggregate["documents"],
+                    "windows": aggregate["windows"],
+                    "macro_comet": aggregate["macro"]["comet"],
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
     )
     print(
         f"Scored {len(rows)} windows across {len(summaries)} cases; "
