@@ -1,6 +1,8 @@
 import pyphen
 import re
 import threading
+from pathlib import Path
+
 import fugashi
 from num2words import num2words
 
@@ -400,6 +402,29 @@ def _expand_decimal(text, lang):
 
 # ========== 缩写识别模块 ==========
 
+# 全大写文本里"普通词"与"缩写串"无法靠形态区分（FREE NEW ITEMS
+# 对比 USA UK），要靠词表：命中词表的按普通词读，未命中的按
+# initialism 逐字母读。词表是 SCOWL 的 2-6 字母小写词（数据文件，
+# 首次使用时加载；读不到文件时退化为全部逐字母读）。
+_EN_COMMON_WORDS_PATH = Path(__file__).with_name("en_common_words.txt")
+_en_common_words_cache = None
+
+
+def _common_english_words():
+    """Lowercase English word list used to disambiguate all-caps text."""
+    global _en_common_words_cache
+    if _en_common_words_cache is None:
+        try:
+            lines = _EN_COMMON_WORDS_PATH.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            lines = []
+        _en_common_words_cache = frozenset(
+            word for line in lines
+            if (word := line.strip()) and not word.startswith("#")
+        )
+    return _en_common_words_cache
+
+
 # 作为完整单词发音的缩写（不逐字母读）及其音节数
 _WORD_ACRONYMS = {
     'NASA': 2, 'NATO': 2, 'ASAP': 4, 'IKEA': 3, 'OPEC': 2,
@@ -468,8 +493,9 @@ def _abbreviation_syllable_count(word, lang='en', context_has_lowercase=True):
     """计算缩写/品牌名的音节数
 
     context_has_lowercase=False 表示整段文本里没有一个普通小写词（如
-    "FREE NEW ITEMS"）：这时全大写是排版风格而不是缩写，返回 None 交给普通
-    音节规则处理。
+    "FREE NEW ITEMS"）。全大写在这一上下文里更可能是排版风格而不是缩写，
+    但只有查得到英语词表的普通词才按词读；'USA UK'、'API URL' 这类
+    initialism 即使没有小写上下文也逐字母读。
     """
     # 规范化：去除尾部标点
     clean = word.rstrip('.,;:!?()[]{}"\'-')
@@ -483,9 +509,11 @@ def _abbreviation_syllable_count(word, lang='en', context_has_lowercase=True):
     if upper in _WORD_ACRONYMS:
         return _WORD_ACRONYMS[upper]
 
-    # 全大写词只在有小写上下文时才逐字母拼读
+    # 全大写词只在有小写上下文时才逐字母拼读；没有小写上下文时，
+    # 仅词表命中的普通词按词读，其余仍按 initialism 逐字母读。
     if clean.isupper() and 2 <= len(clean) <= 6 and not context_has_lowercase:
-        return None
+        if lang != 'en' or clean.lower() in _common_english_words():
+            return None
 
     # 逐字母拼读的缩写（使用规范化后的 token）
     if _is_spelled_out_acronym(clean):

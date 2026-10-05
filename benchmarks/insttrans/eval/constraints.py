@@ -93,15 +93,25 @@ def collect_soft_constraint_descs(
 
 # ======================== Rule-based checkers ========================
 
+# Han (incl. Ext-A) and kana: CJK runs have no word boundaries, so a Latin
+# term glued to them ("这是GPT-4的说明") must still count as present.
+_CJK_NEIGHBOUR = r"\u3400-\u4dbf\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff"
+
+
 def _build_term_pattern(term: str) -> str:
     escaped = re.escape(term)
     # CJK has no word boundaries; \b would never match against them.
     if any(("一" <= ch <= "鿿") or ("぀" <= ch <= "ヿ") for ch in term):
         return escaped
-    # \w is Unicode-aware, so a Latin term glued to CJK text ("这是GPT-4的说明")
-    # had no boundary on either side and was reported missing. ASCII word
-    # classes accept CJK neighbours while still rejecting "GPT-4x".
-    return rf"(?<![0-9A-Za-z_]){escaped}(?![0-9A-Za-z_])"
+    # \w is Unicode-aware: an ASCII-only boundary class wrongly accepts term
+    # substrings inside other scripts' words ("سلام" inside "السلامة", "Öl"
+    # inside "Ölüberfluss"). Keep word boundaries for every non-CJK letter,
+    # while still accepting CJK neighbours (\w covers CJK, so the explicit
+    # CJK alternative re-allows it).
+    return (
+        rf"(?:(?<!\w)|(?<=[{_CJK_NEIGHBOUR}])){escaped}"
+        rf"(?:(?!\w)|(?=[{_CJK_NEIGHBOUR}]))"
+    )
 
 
 def check_glossary(target_text: str, required_terms: list[str]) -> dict[str, Any]:
