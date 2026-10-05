@@ -66,6 +66,8 @@ check("glossary arabic substring", check_glossary("السلامة", ["سلام"]
 check("glossary arabic standalone", check_glossary("سلام عليكم", ["سلام"])["is_valid"], True)
 check("glossary accent substring", check_glossary("Ölüberfluss", ["Öl"])["is_valid"], False)
 check("glossary accent standalone", check_glossary("Öl ist teuer", ["Öl"])["is_valid"], True)
+check("glossary hangul-adjacent", check_glossary("이것은GPT-4입니다", ["GPT-4"])["is_valid"], True)
+check("glossary thai-adjacent", check_glossary("นี่คือGPT-4ครับ", ["GPT-4"])["is_valid"], True)
 
 section("2 markdown trigger")
 check("md ordered-list", check_format_preserve("1. alpha\n2. beta", "甲\n乙")["is_valid"], False)

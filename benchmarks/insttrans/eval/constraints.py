@@ -93,24 +93,32 @@ def collect_soft_constraint_descs(
 
 # ======================== Rule-based checkers ========================
 
-# Han (incl. Ext-A) and kana: CJK runs have no word boundaries, so a Latin
-# term glued to them ("这是GPT-4的说明") must still count as present.
-_CJK_NEIGHBOUR = r"\u3400-\u4dbf\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff"
+# Scripts that do not delimit words with spaces: Han, kana, Hangul and Thai.
+# A Latin term glued to them ("这是GPT-4的说明", "이것은GPT-4입니다") must still
+# count as present; the previous ASCII-only class accepted these neighbours and
+# a narrowed class must not regress them.
+_NO_SPACE_SCRIPTS = (
+    r"\u3040-\u309f\u30a0-\u30ff"              # hiragana, katakana
+    r"\u3400-\u4dbf\u4e00-\u9fff"              # Han (incl. Ext-A)
+    r"\uac00-\ud7a3\u1100-\u11ff\u3130-\u318f"  # Hangul syllables, Jamo, compat jamo
+    r"\u0e00-\u0e7f"                            # Thai
+)
+_NO_SPACE_CHAR = re.compile(f"[{_NO_SPACE_SCRIPTS}]")
 
 
 def _build_term_pattern(term: str) -> str:
     escaped = re.escape(term)
-    # CJK has no word boundaries; \b would never match against them.
-    if any(("一" <= ch <= "鿿") or ("぀" <= ch <= "ヿ") for ch in term):
+    # Terms written in a no-space script have no word boundaries to anchor on.
+    if _NO_SPACE_CHAR.search(term):
         return escaped
     # \w is Unicode-aware: an ASCII-only boundary class wrongly accepts term
     # substrings inside other scripts' words ("سلام" inside "السلامة", "Öl"
-    # inside "Ölüberfluss"). Keep word boundaries for every non-CJK letter,
-    # while still accepting CJK neighbours (\w covers CJK, so the explicit
-    # CJK alternative re-allows it).
+    # inside "Ölüberfluss"). Keep word boundaries for every non-no-space
+    # letter, while still accepting no-space neighbours (\w covers them, so
+    # the explicit script alternative re-allows them).
     return (
-        rf"(?:(?<!\w)|(?<=[{_CJK_NEIGHBOUR}])){escaped}"
-        rf"(?:(?!\w)|(?=[{_CJK_NEIGHBOUR}]))"
+        rf"(?:(?<!\w)|(?<=[{_NO_SPACE_SCRIPTS}])){escaped}"
+        rf"(?:(?!\w)|(?=[{_NO_SPACE_SCRIPTS}]))"
     )
 
 
